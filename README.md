@@ -2,6 +2,8 @@
 
 This is a simple ping application that displays real-time ping times to a specified host using a Deno backend, a WebSocket connection, and a WebView frontend with a Chart.js graph.
 
+![image](https://github.com/user-attachments/assets/e336c6c1-d069-4fbd-8330-d061d82f4228)
+
 ## Project Structure
 
 - `backend/`: Contains the Deno server that performs ping operations and serves WebSocket connections.
