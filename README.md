@@ -4,6 +4,16 @@ This is a simple ping application that displays real-time ping times to a specif
 
 ![image](https://github.com/user-attachments/assets/e336c6c1-d069-4fbd-8330-d061d82f4228)
 
+## Running the Application
+
+To run the application, simply execute the WebView script:
+
+```
+deno run --allow-all --reload https://raw.githubusercontent.com/sigmaSd/ping1/master/webview/main.ts
+```
+
+This will start the backend server and open a desktop window displaying the ping times graph.
+
 ## Project Structure
 
 - `backend/`: Contains the Deno server that performs ping operations and serves WebSocket connections.
@@ -21,16 +31,6 @@ This is a simple ping application that displays real-time ping times to a specif
 
 - Deno (https://deno.land/)
 - WebView dependencies (https://webview.dev/)
-
-## Running the Application
-
-To run the application, simply execute the WebView script:
-
-```
-deno run --allow-all webview/main.ts
-```
-
-This will start the backend server and open a desktop window displaying the ping times graph.
 
 ## Configuration
 
