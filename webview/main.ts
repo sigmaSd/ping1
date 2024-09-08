@@ -1,7 +1,7 @@
 #!/usr/bin/env -S deno run --allow-all
 import { Webview } from "jsr:@webview/webview";
 
-const worker = new Worker(import.meta.resolve("../backend/server.ts"), {
+const _worker = new Worker(import.meta.resolve("../backend/server.ts"), {
   type: "module",
 });
 
