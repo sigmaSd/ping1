@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-net --allow-read --allow-run=ping
+#!/usr/bin/env -S deno run --allow-net --allow-read --allow-run
 const pingHost = "8.8.8.8";
 
 async function* pingGenerator() {
@@ -52,7 +52,9 @@ Deno.serve({ port: 3000 }, async (req) => {
   }
 
   if (path === "/" || path === "/index.html") {
-    return new Response(await Deno.readTextFile("./frontend/index.html"), {
+    const html = await fetch(import.meta.resolve("../frontend/index.html"))
+      .then((res) => res.text());
+    return new Response(html, {
       headers: { "content-type": "text/html" },
     });
   }
