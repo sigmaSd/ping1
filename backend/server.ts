@@ -1,5 +1,28 @@
 #!/usr/bin/env -S deno run --allow-net --allow-read --allow-run
-const pingHost = "example.com"; // Replace with the host you want to ping
+const pingHost = "8.8.8.8";
+
+async function* pingGenerator() {
+  const process = new Deno.Command("ping", {
+    args: [pingHost],
+    stdout: "piped",
+    stderr: "piped",
+  }).spawn();
+
+  const reader = process.stdout.getReader();
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    const output = new TextDecoder().decode(value);
+    const match = output.match(/time=(\d+(\.\d+)?)/);
+    if (match) {
+      yield parseFloat(match[1]);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
 
 Deno.serve({ port: 3000 }, async (req) => {
   const path = new URL(req.url).pathname;
@@ -9,31 +32,20 @@ Deno.serve({ port: 3000 }, async (req) => {
 
     console.log("New WebSocket connection");
 
-    socket.addEventListener("open", () => {
+    socket.addEventListener("open", async () => {
       console.log("WebSocket connection opened");
 
-      const pingInterval = setInterval(async () => {
-        try {
-          const start = performance.now();
-          const process = new Deno.Command("ping", {
-            args: ["-c", "1", pingHost],
-            stdout: "piped",
-            stderr: "piped",
-          });
-          await process.spawn().status;
-          const end = performance.now();
-          const pingTime = Math.round(end - start);
-
+      for await (const pingTime of pingGenerator()) {
+        if (socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify({ ping: pingTime }));
-        } catch (error) {
-          console.error("Error pinging:", error);
+        } else {
+          break;
         }
-      }, 1000);
+      }
+    });
 
-      socket.addEventListener("close", () => {
-        console.log("WebSocket connection closed");
-        clearInterval(pingInterval);
-      });
+    socket.addEventListener("close", () => {
+      console.log("WebSocket connection closed");
     });
 
     return response;
