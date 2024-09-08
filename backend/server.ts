@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-net --allow-read --allow-run
+#!/usr/bin/env -S deno run --allow-net --allow-read --allow-run=ping
 const pingHost = "8.8.8.8";
 
 async function* pingGenerator() {
