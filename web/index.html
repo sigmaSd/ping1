@@ -499,8 +499,22 @@
       </div>
     </div>
 
+    <script src="/__denoapk/runtime.js"></script>
     <script>
-    const ws = new WebSocket("ws://" + window.location.host);
+    // Android serves this page over https:// (a secure origin, needed for
+    // localStorage) with no WebSocket server behind it at all -- the
+    // browser refuses to even construct a ws:// WebSocket from a secure
+    // page (mixed-content SecurityError), synchronously, which would
+    // otherwise abort this entire script before anything below it runs.
+    // A dummy keeps every ws.readyState/onX usage below harmless; ping
+    // itself doesn't depend on any of this (see denoapk.execStream()).
+    let ws;
+    try {
+      ws = new WebSocket("ws://" + window.location.host);
+    } catch (e) {
+      console.warn("WebSocket unavailable, continuing without it:", e);
+      ws = { readyState: WebSocket.CLOSED, send() {} };
+    }
     const ctx = document.getElementById("pingChart").getContext("2d");
 
     // Elements
@@ -540,6 +554,20 @@
     let bookmarks = [];
     let isPaused = false;
     let colorIndex = 0;
+    let monitorsSeeded = false;
+
+    // On Android there is no WebSocket server at all -- ws never opens, so
+    // the "monitors" message below (which normally seeds the initial
+    // monitor list from the desktop's saved monitors.json) never arrives.
+    // This covers that, and any other case the WS never connects, without
+    // changing desktop's existing behavior: the WS path still wins the
+    // race there (near-instant open + an immediate "monitors" message).
+    function seedDefaultMonitorIfNeeded() {
+      if (monitorsSeeded) return;
+      monitorsSeeded = true;
+      if (monitors.size === 0) addMonitor("1.1.1.1");
+    }
+    setTimeout(seedDefaultMonitorIfNeeded, 1500);
 
     // Initialize Bookmarks
     function renderBookmarks() {
@@ -677,15 +705,60 @@
       // Add Row to Table
       renderMonitorRow(monitor);
 
-      // Start Backend
+      // Start pinging via denoapk.execStream -- works identically on
+      // desktop (server.ts's /__denoapk/exec-stream/ route) and Android
+      // (ExecStreamBridge), unlike the old ws.send({type:"start",host})
+      // which only ever worked on desktop.
+      startPingStream(monitor);
+
+      // Persist to monitors.json so it survives a desktop restart -- a
+      // no-op on Android (ws never opens there), same as bookmarks.
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "start", host }));
+      }
+    }
+
+    function startPingStream(monitor) {
+      // -O: report "no answer yet" for a late/missing reply instead of
+      // staying silent -- same flag the old Deno-side ping session used,
+      // and what makes timeout detection below possible at all.
+      const stream = denoapk.execStream("/system/bin/ping", [
+        "-O",
+        monitor.host,
+      ]);
+      monitor.stream = stream;
+      let buffer = "";
+      (async () => {
+        try {
+          for await (const chunk of stream) {
+            buffer += chunk;
+            const lines = buffer.split("\n");
+            buffer = lines.pop();
+            for (const line of lines) parsePingLine(monitor.host, line);
+          }
+        } catch (e) {
+          console.error("ping stream failed for", monitor.host, e);
+        }
+      })();
+    }
+
+    // Same regex/substring checks the old Deno-side ping session used
+    // (see git history: server.ts's startPingSession) -- now run here
+    // instead, since denoapk.execStream() hands back raw ping output on
+    // both platforms rather than pre-parsed WebSocket messages.
+    function parsePingLine(host, line) {
+      const match = line.match(/time=(\d+(\.\d+)?)/);
+      if (match) {
+        handlePingResult(host, parseFloat(match[1]), false);
+      } else if (line.includes("no answer yet")) {
+        handlePingResult(host, 0, true);
       }
     }
 
     function removeMonitor(host) {
       if (!monitors.has(host)) return;
 
+      const monitor = monitors.get(host);
       monitors.delete(host);
 
       // Remove from Chart
@@ -703,7 +776,10 @@
       );
       if (row) row.remove();
 
-      // Stop Backend
+      // Stop pinging
+      monitor.stream?.cancel();
+
+      // Remove from persisted monitors.json (desktop only, see addMonitor).
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "stop", host }));
       }
@@ -752,15 +828,13 @@
       pauseAllBtn.querySelector("span").textContent = isPaused
         ? "play_arrow"
         : "pause";
-      if (ws.readyState === WebSocket.OPEN) {
-        if (isPaused) {
-          ws.send(JSON.stringify({ type: "pauseAll" }));
-        } else {
-          // Resume all active monitors
-          monitors.forEach((_, host) => {
-            ws.send(JSON.stringify({ type: "start", host }));
-          });
-        }
+      // Actually stop/restart each stream (not just suppress UI updates) --
+      // matches the old ws.send({type:"pauseAll"})'s behavior of killing
+      // the ping subprocesses rather than leaving them running unseen.
+      if (isPaused) {
+        monitors.forEach((monitor) => monitor.stream?.cancel());
+      } else {
+        monitors.forEach((monitor) => startPingStream(monitor));
       }
     });
 
@@ -798,6 +872,7 @@
         }
 
         if (data.type === "monitors") {
+          monitorsSeeded = true;
           if (data.hosts && data.hosts.length > 0) {
             data.hosts.forEach((host) => addMonitor(host));
           } else if (monitors.size === 0) {
@@ -834,64 +909,72 @@
         }
 
         if (data.host && data.ping !== undefined) {
-          const monitor = monitors.get(data.host);
-          if (monitor) {
-            const now = new Date();
-            const timeString = now.toLocaleTimeString();
-
-            // Update Data
-            monitor.data.push(data.ping);
-            if (monitor.data.length > MAX_DATA_POINTS) {
-              monitor.data.shift();
-            }
-
-            // Update Chart Dataset
-            const dataset = chart.data.datasets.find((d) =>
-              d.label.startsWith(data.host) ||
-              d.label.includes(data.host)
-            );
-            if (dataset) {
-              dataset.data.push(data.ping);
-              if (dataset.data.length > MAX_DATA_POINTS) {
-                dataset.data.shift();
-              }
-              if (chart.data.labels.length < dataset.data.length) {
-                chart.data.labels.push(timeString);
-              }
-              if (chart.data.labels.length > MAX_DATA_POINTS) {
-                chart.data.labels.shift();
-              }
-              dataset._timedOut = !!data.timeout;
-            }
-
-            chart.update();
-
-            // Update Stats
-            const safeId = data.host.replace(/[.:]/g, "-");
-            if (data.timeout) {
-              const currEl = document.getElementById(`curr-${safeId}`);
-              if (currEl) currEl.textContent = "Timeout";
-            } else {
-              const pings = monitor.data.filter((v) => v !== 0);
-              const current = data.ping;
-              const avg = pings.length > 0
-                ? (pings.reduce((a, b) => a + b, 0) / pings.length).toFixed(1)
-                : "--";
-              const max = pings.length > 0 ? Math.max(...pings) : "--";
-
-              const currEl = document.getElementById(`curr-${safeId}`);
-              if (currEl) {
-                currEl.textContent = current + " ms";
-                document.getElementById(`avg-${safeId}`).textContent = avg + " ms";
-                document.getElementById(`max-${safeId}`).textContent = max + " ms";
-              }
-            }
-          }
+          handlePingResult(data.host, data.ping, !!data.timeout);
         }
       } catch (e) {
         console.error(e);
       }
     };
+
+    // Ported out of the old ws.onmessage handler so it can be called
+    // either from there (desktop, while the WS ping path still exists) or
+    // from parsePingLine (both platforms, via denoapk.execStream) -- the
+    // chart/stats update logic itself is untouched from the original.
+    function handlePingResult(host, ping, timeout) {
+      const monitor = monitors.get(host);
+      if (!monitor) return;
+
+      const now = new Date();
+      const timeString = now.toLocaleTimeString();
+
+      // Update Data
+      monitor.data.push(ping);
+      if (monitor.data.length > MAX_DATA_POINTS) {
+        monitor.data.shift();
+      }
+
+      // Update Chart Dataset
+      const dataset = chart.data.datasets.find((d) =>
+        d.label.startsWith(host) ||
+        d.label.includes(host)
+      );
+      if (dataset) {
+        dataset.data.push(ping);
+        if (dataset.data.length > MAX_DATA_POINTS) {
+          dataset.data.shift();
+        }
+        if (chart.data.labels.length < dataset.data.length) {
+          chart.data.labels.push(timeString);
+        }
+        if (chart.data.labels.length > MAX_DATA_POINTS) {
+          chart.data.labels.shift();
+        }
+        dataset._timedOut = timeout;
+      }
+
+      chart.update();
+
+      // Update Stats
+      const safeId = host.replace(/[.:]/g, "-");
+      if (timeout) {
+        const currEl = document.getElementById(`curr-${safeId}`);
+        if (currEl) currEl.textContent = "Timeout";
+      } else {
+        const pings = monitor.data.filter((v) => v !== 0);
+        const current = ping;
+        const avg = pings.length > 0
+          ? (pings.reduce((a, b) => a + b, 0) / pings.length).toFixed(1)
+          : "--";
+        const max = pings.length > 0 ? Math.max(...pings) : "--";
+
+        const currEl = document.getElementById(`curr-${safeId}`);
+        if (currEl) {
+          currEl.textContent = current + " ms";
+          document.getElementById(`avg-${safeId}`).textContent = avg + " ms";
+          document.getElementById(`max-${safeId}`).textContent = max + " ms";
+        }
+      }
+    }
 
     function formatSpeed(bytesPerSec) {
       if (!bytesPerSec) return "0 B/s";

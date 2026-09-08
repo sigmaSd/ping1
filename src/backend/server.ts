@@ -1,10 +1,7 @@
 #!/usr/bin/env -S deno run --allow-all
 /// <reference lib="deno.worker" />
 
-interface PingSession {
-  process: Deno.ChildProcess;
-  retryTimeout?: NodeJS.Timeout;
-}
+import { mergeReadableStreams } from "@std/streams/merge-readable-streams";
 
 interface Bookmark {
   ip: string;
@@ -25,7 +22,6 @@ await Deno.mkdir(appDir, { recursive: true });
 
 const BOOKMARKS_FILE = `${appDir}/bookmarks.json`;
 const MONITORS_FILE = `${appDir}/monitors.json`;
-const activePings = new Map<string, PingSession>();
 
 async function getBookmarks(): Promise<Bookmark[]> {
   try {
@@ -61,140 +57,6 @@ async function saveMonitors(hosts: string[]) {
     await Deno.writeTextFile(MONITORS_FILE, JSON.stringify(hosts, null, 2));
   } catch (e) {
     console.error("Error saving monitors:", e);
-  }
-}
-
-function startPingSession(socket: WebSocket, host: string) {
-  stopPing(host);
-
-  const debugTimeouts = Deno.env.get("DEBUG_TIMEOUTS") === "1";
-  let debugCount = 0;
-  let debugBurst = 0;
-
-  const cmd = new Deno.Command("ping", {
-    args: ["-O", host],
-    stdout: "piped",
-    stderr: "piped",
-    env: {
-      LC_ALL: "C",
-    },
-  });
-
-  const process = cmd.spawn();
-  const session: PingSession = { process };
-  activePings.set(host, session);
-
-  // Handle stdout
-  (async () => {
-    try {
-      const stream = process.stdout.pipeThrough(new TextDecoderStream());
-      for await (const value of stream) {
-        if (activePings.get(host)?.process !== process) break;
-
-        const match = value.match(/time=(\d+(\.\d+)?)/);
-        if (match) {
-          if (debugTimeouts) {
-            if (debugBurst > 0) {
-              debugBurst--;
-              if (socket.readyState === WebSocket.OPEN) {
-                socket.send(JSON.stringify({ host, ping: 0, timeout: true }));
-              }
-              continue;
-            }
-            debugCount++;
-            if (debugCount % 8 === 0) {
-              debugBurst = 3;
-              if (socket.readyState === WebSocket.OPEN) {
-                socket.send(JSON.stringify({ host, ping: 0, timeout: true }));
-              }
-              continue;
-            }
-          }
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ host, ping: parseFloat(match[1]) }));
-          }
-        }
-        if (value.includes("no answer yet")) {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ host, ping: 0, timeout: true }));
-          }
-        }
-      }
-    } catch (_error) {
-      // Ignore
-    }
-  })();
-
-  // Handle stderr for errors (like unknown host)
-  (async () => {
-    try {
-      const stderrStream = process.stderr.pipeThrough(new TextDecoderStream());
-      for await (const chunk of stderrStream) {
-        if (activePings.get(host)?.process !== process) break;
-        if (chunk.trim().length > 0) {
-          console.error(`Ping stderr (${host}):`, chunk);
-          // Simple heuristic to show relevant errors
-          if (
-            chunk.includes("unknown host") ||
-            chunk.includes("Temporary failure") ||
-            chunk.includes("Name or service not known")
-          ) {
-            if (socket.readyState === WebSocket.OPEN) {
-              socket.send(
-                JSON.stringify({
-                  type: "error",
-                  host,
-                  message: `Ping failed for ${host}: ${chunk.trim()}`,
-                }),
-              );
-            }
-          }
-        }
-      }
-    } catch (_e) {
-      // Ignore
-    }
-  })();
-
-  // Handle process exit
-  process.status.then((status) => {
-    const currentSession = activePings.get(host);
-    if (currentSession?.process === process) {
-      // Process exited unexpectedly (not killed by stopPing)
-      if (!status.success) {
-        console.log(
-          `Ping process for ${host} exited unexpectedly, retrying in 2s...`,
-        );
-        if (socket.readyState === WebSocket.OPEN) {
-          currentSession.retryTimeout = setTimeout(() => {
-            startPingSession(socket, host);
-          }, 2000);
-        }
-      } else {
-        activePings.delete(host);
-      }
-    }
-  });
-}
-
-function stopPing(host: string) {
-  const session = activePings.get(host);
-  if (session) {
-    try {
-      session.process.kill();
-    } catch (_e) {
-      // Ignore
-    }
-    if (session.retryTimeout) {
-      clearTimeout(session.retryTimeout);
-    }
-    activePings.delete(host);
-  }
-}
-
-function stopAllPings() {
-  for (const host of activePings.keys()) {
-    stopPing(host);
   }
 }
 
@@ -415,6 +277,114 @@ function stopNetworkWatcher() {
   }
 }
 
+// Desktop-side counterparts of denoapk's exec/execStream capabilities (see
+// ExecClient.java / ExecStreamBridge.java in denoapk, and its README's
+// "Running native commands" section for the wire format both ends agree
+// on). No allowlist here either -- matches denoapk's own trust model, not
+// an independent decision made for this app.
+
+function parseExecRequest(
+  encoded: string,
+): { cmd: string; args: string[] } | { error: string } {
+  let parsed: { cmd?: unknown; args?: unknown };
+  try {
+    parsed = JSON.parse(encoded);
+  } catch (e) {
+    return { error: "bad exec request: " + e };
+  }
+  const cmd = typeof parsed.cmd === "string" ? parsed.cmd : null;
+  if (!cmd || !cmd.startsWith("/")) {
+    return { error: "cmd must be an absolute path" };
+  }
+  const args = Array.isArray(parsed.args)
+    ? parsed.args.filter((a): a is string => typeof a === "string")
+    : [];
+  return { cmd, args };
+}
+
+async function handleExec(encoded: string): Promise<Response> {
+  const parsed = parseExecRequest(encoded);
+  if ("error" in parsed) {
+    return new Response(parsed.error, { status: 400 });
+  }
+
+  let process: Deno.ChildProcess;
+  try {
+    process = new Deno.Command(parsed.cmd, {
+      args: parsed.args,
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+  } catch (e) {
+    return new Response("exec unavailable: " + e, { status: 500 });
+  }
+
+  let timedOut = false;
+  // 10s default, matching ExecClient.java's default; no per-request
+  // timeoutMs override on this side yet -- add if a caller ever needs one.
+  const killTimer = setTimeout(() => {
+    timedOut = true;
+    try {
+      process.kill();
+    } catch {
+      // already exited
+    }
+  }, 10_000);
+
+  const [status, stdout, stderr] = await Promise.all([
+    process.status,
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+  ]);
+  clearTimeout(killTimer);
+
+  return Response.json({
+    ok: status.success && !timedOut,
+    exitCode: timedOut ? null : status.code,
+    stdout,
+    stderr,
+    timedOut,
+  });
+}
+
+function handleExecStream(req: Request, encoded: string): Response {
+  const parsed = parseExecRequest(encoded);
+  if ("error" in parsed) {
+    return new Response(parsed.error, { status: 400 });
+  }
+
+  let process: Deno.ChildProcess;
+  try {
+    process = new Deno.Command(parsed.cmd, {
+      args: parsed.args,
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+  } catch (e) {
+    return new Response("exec unavailable: " + e, { status: 500 });
+  }
+
+  // The client disconnecting or cancelling the fetch fires this -- matches
+  // ExecStreamBridge.java's cancel() killing the process, so a caller
+  // stopping consumption never leaks a running subprocess on either
+  // platform.
+  req.signal.addEventListener("abort", () => {
+    try {
+      process.kill();
+    } catch {
+      // already exited
+    }
+  });
+
+  // Merged, matching Android's redirectErrorStream(true) -- the shell only
+  // has one InputStream to hand the WebView, so both ends agree on one
+  // merged stream rather than exposing stdout/stderr separately here.
+  const merged = mergeReadableStreams(process.stdout, process.stderr);
+  return new Response(merged, {
+    headers: { "content-type": "text/plain; charset=utf-8" },
+  });
+}
+
 if (import.meta.main) {
   Deno.serve({
     port: 0,
@@ -451,23 +421,26 @@ if (import.meta.main) {
       socket.addEventListener("message", async (event) => {
         try {
           const data = JSON.parse(event.data);
+          // "start"/"stop" used to also manage the actual ping subprocess;
+          // that moved to denoapk.execStream() (see web/index.html's
+          // startPingStream/removeMonitor), called directly by the page
+          // rather than through this socket, so both platforms share one
+          // mechanism. What's left here is purely persisting the monitor
+          // list across restarts -- a desktop-only feature (this socket
+          // doesn't exist on Android at all), same as bookmarks below.
           if (data.type === "start" && data.host) {
-            startPingSession(socket, data.host);
             const savedMonitors = await getSavedMonitors();
             if (!savedMonitors.includes(data.host)) {
               savedMonitors.push(data.host);
               await saveMonitors(savedMonitors);
             }
           } else if (data.type === "stop" && data.host) {
-            stopPing(data.host);
             const savedMonitors = await getSavedMonitors();
             const index = savedMonitors.indexOf(data.host);
             if (index > -1) {
               savedMonitors.splice(index, 1);
               await saveMonitors(savedMonitors);
             }
-          } else if (data.type === "pauseAll") {
-            stopAllPings();
           } else if (data.type === "addBookmark" && data.bookmark) {
             const bms = await getBookmarks();
             bms.push(data.bookmark);
@@ -488,7 +461,6 @@ if (import.meta.main) {
 
       socket.addEventListener("close", () => {
         console.log("WebSocket connection closed");
-        stopAllPings();
         stopSpeedSession();
         stopNetworkWatcher();
       });
@@ -496,8 +468,33 @@ if (import.meta.main) {
       return response;
     }
 
+    // Desktop-side counterparts of denoapk's native exec routes, so
+    // web/index.html's denoapk.exec()/denoapk.execStream() calls work
+    // identically whether they're running here or in the Android shell —
+    // see denoapk's README ("Running native commands") for the wire
+    // format both ends agree on.
+    if (path.startsWith("/__denoapk/exec-stream/")) {
+      return handleExecStream(
+        req,
+        decodeURIComponent(path.slice("/__denoapk/exec-stream/".length)),
+      );
+    }
+    if (path.startsWith("/__denoapk/exec/")) {
+      return await handleExec(
+        decodeURIComponent(path.slice("/__denoapk/exec/".length)),
+      );
+    }
+
+    if (path === "/__denoapk/runtime.js") {
+      const js = await fetch(import.meta.resolve("../../host/runtime.js"))
+        .then((res) => res.text());
+      return new Response(js, {
+        headers: { "content-type": "text/javascript; charset=utf-8" },
+      });
+    }
+
     if (path === "/" || path === "/index.html") {
-      const html = await fetch(import.meta.resolve("../frontend/index.html"))
+      const html = await fetch(import.meta.resolve("../../web/index.html"))
         .then((res) => res.text());
       return new Response(html, {
         headers: { "content-type": "text/html" },
@@ -506,7 +503,7 @@ if (import.meta.main) {
 
     if (path.startsWith("/assets/")) {
       const assetPath = path.replace("/assets/", "");
-      const fileUrl = import.meta.resolve(`../frontend/assets/${assetPath}`);
+      const fileUrl = import.meta.resolve(`../../web/assets/${assetPath}`);
       try {
         const file = await fetch(fileUrl);
         if (!file.ok) return new Response("Not Found", { status: 404 });

@@ -1,6 +1,6 @@
 {
   "tasks": {
-    "compile": "deno compile --no-check --output pingChart -A --include src/backend/server.ts --include src/frontend/index.html src/webview/main.ts",
+    "compile": "deno compile --no-check --output pingChart -A --include src/backend/server.ts --include web --include host/runtime.js src/webview/main.ts",
     "install": {
       "command": "deno -A jsr:@sigmasd/install-app@0.6.1 install pingChart",
       "dependencies": [
@@ -10,9 +10,16 @@
   },
   "imports": {
     "@sigmasd/gtk": "jsr:@sigmasd/gtk@^0.65.0",
-    "@webview/webview": "jsr:@webview/webview@^0.9.0"
+    "@webview/webview": "jsr:@webview/webview@^0.9.0",
+    "@std/streams": "jsr:@std/streams@^1"
   },
   "exclude": [
     "distro"
-  ]
+  ],
+  "desktop": {
+    "app": {
+      "name": "Ping Chart",
+      "identifier": "io.github.sigmasd.pingmonitor"
+    }
+  }
 }
