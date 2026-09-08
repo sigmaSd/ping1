@@ -488,7 +488,7 @@
         <span class="network-label">Public IP:</span>
         <span id="publicIp">Loading...</span>
       </div>
-      <div class="network-item">
+      <div class="network-item" id="localIpItem">
         <span class="network-label">Local IP:</span>
         <span id="localIp">Loading...</span>
       </div>
@@ -585,6 +585,16 @@
       "#FFCD56",
       "#C9CBCF",
     ];
+
+    // Local IP and download/upload speed read Deno.networkInterfaces() and
+    // /proc/net/dev server-side -- no browser equivalent exists, and no
+    // denoapk capability covers this (unlike ping, which moved to
+    // exec/execStream). They'd stay stuck on "Loading..."/"--" forever on
+    // Android, so hide them there instead of showing permanently-dead UI.
+    if (denoapk.platform === "android") {
+      document.querySelector(".stats-container").style.display = "none";
+      document.getElementById("localIpItem").style.display = "none";
+    }
 
     // State
     let monitors = new Map(); // host -> { color, data: [], stats: { ... } }

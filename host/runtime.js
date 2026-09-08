@@ -36,6 +36,12 @@
  *
  * The same file is served by the Deno host (e.g. report.ts) and baked into
  * the APK, so both platforms agree on the wire format for everything else.
+ *
+ * denoapk.platform ("android" | "desktop") is for the rarer case where an
+ * app has something genuinely platform-specific to do -- not another
+ * exec/execStream-style capability gap, just e.g. hiding UI for a feature
+ * with no browser equivalent at all (see pingmonitor's Local IP/bandwidth,
+ * which read Deno.networkInterfaces()/procfs directly).
  */
 (function () {
   const PROXY = "/__denoapk/proxy/";
@@ -71,6 +77,16 @@
   // above — it goes straight to the host, native on Android or Deno.Command
   // on desktop (see that host's own /__denoapk/exec/ route).
   globalThis.denoapk = globalThis.denoapk || {};
+
+  // For app code that needs to know which platform it's on -- e.g. hiding
+  // UI for something that's genuinely desktop-only (no browser equivalent
+  // exists at all, unlike exec/execStream which work everywhere). Reuses
+  // the same signal execStream's own transport picks itself by, rather
+  // than being a second, independently-maintained detection mechanism.
+  globalThis.denoapk.platform = globalThis.DenoapkExecStreamBridge
+    ? "android"
+    : "desktop";
+
   globalThis.denoapk.exec = function (cmd, args, opts) {
     const body = { cmd, args: args || [] };
     if (opts && opts.timeoutMs) body.timeoutMs = opts.timeoutMs;
