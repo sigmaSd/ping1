@@ -66,6 +66,7 @@
 
     .top-bar {
       display: flex;
+      flex-wrap: wrap;
       justify-content: space-between;
       align-items: center;
       padding: 0.75rem 1.5rem;
@@ -74,7 +75,7 @@
       flex-shrink: 0;
       box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
       z-index: 10;
-      gap: 1rem;
+      gap: 0.5rem 1rem;
     }
 
     .controls-area {
@@ -101,6 +102,7 @@
       font-family: inherit;
       font-size: 0.9rem;
       width: 200px;
+      max-width: 40vw;
       outline: none;
       transition: border-color 0.2s;
     }
@@ -247,12 +249,13 @@
 
     .network-bar {
       display: flex;
+      flex-wrap: wrap;
       justify-content: flex-start;
       align-items: center;
       padding: 0.5rem 1.5rem;
       background-color: var(--bg-color);
       font-size: 0.85rem;
-      gap: 1.5rem;
+      gap: 0.5rem 1.5rem;
       flex-shrink: 0;
       opacity: 0.8;
       border-top: 1px solid var(--header-border);
@@ -362,6 +365,40 @@
     @media (max-width: 400px) {
       .modal-input {
         flex-basis: 100%; /* Stack on very small screens */
+      }
+    }
+
+    /* Phone-width layout: this was designed for a desktop window and never
+       reflowed below it -- .top-bar in particular (host input + 3 buttons +
+       download/upload stats, all on one non-wrapping row) needed roughly
+       450-500px to fit everything, wider than a typical phone's ~360-400px
+       CSS viewport, so the rightmost controls were pushed off-screen
+       entirely (confirmed on-device, not just guessed from the CSS).
+       flex-wrap above lets that row become two rows instead of clipping;
+       this tightens spacing/sizing so it fits comfortably at that width. */
+    @media (max-width: 480px) {
+      .top-bar {
+        padding: 0.6rem 0.75rem;
+      }
+      .host-input {
+        width: 120px;
+      }
+      .stats-container {
+        gap: 0.75rem;
+        font-size: 0.8rem;
+      }
+      .network-bar {
+        padding: 0.5rem 0.75rem;
+        gap: 0.4rem 1rem;
+      }
+      .chart-area {
+        padding: 0.75rem 0.5rem;
+      }
+      .monitor-list-area {
+        padding: 0.75rem;
+      }
+      .monitor-table {
+        font-size: 0.8rem;
       }
     }
 
@@ -568,6 +605,35 @@
       if (monitors.size === 0) addMonitor("1.1.1.1");
     }
     setTimeout(seedDefaultMonitorIfNeeded, 1500);
+
+    // Same idea for the public IP: the desktop backend fetches it itself
+    // (VPN-switching-aware: a fresh HTTP client forces a new DNS/TCP lookup
+    // rather than reusing a stale VPN-era connection) and pushes it over
+    // the WS -- but that never arrives on Android. Cloudflare's endpoint
+    // sends no CORS headers, so this cross-origin fetch would otherwise be
+    // rejected -- but it transparently rewrites through the existing
+    // /__denoapk/proxy/ shim (see runtime.js) exactly like any other
+    // cross-origin fetch, so no new capability was needed for this one.
+    let publicIpSeeded = false;
+    function seedPublicIpIfNeeded() {
+      if (publicIpSeeded) return;
+      publicIpSeeded = true;
+      fetchPublicIp();
+    }
+    setTimeout(seedPublicIpIfNeeded, 1500);
+
+    async function fetchPublicIp() {
+      try {
+        const res = await fetch("https://www.cloudflare.com/cdn-cgi/trace");
+        const text = await res.text();
+        const ip = text.split("\n").find((l) => l.startsWith("ip="))
+          ?.split("=")[1];
+        document.getElementById("publicIp").textContent = ip || "Unknown";
+      } catch (e) {
+        console.error("public IP fetch failed:", e);
+        document.getElementById("publicIp").textContent = "Error";
+      }
+    }
 
     // Initialize Bookmarks
     function renderBookmarks() {
@@ -882,6 +948,7 @@
         }
 
         if (data.type === "networkInfo") {
+          publicIpSeeded = true;
           document.getElementById("publicIp").textContent = data.publicIp ||
             "Unknown";
           if (data.interfaces && data.interfaces.length > 0) {
