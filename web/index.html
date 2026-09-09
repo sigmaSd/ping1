@@ -402,6 +402,32 @@
       }
     }
 
+    /* Landscape phone / any short viewport: this device is ~360px CSS
+       height in landscape (720x1640 physical, 2x density), and
+       .chart-area's min-height:300px alone nearly filled that, pushing the
+       monitor table and network-bar bar below the fold -- the whole page
+       needed scrolling to reach them. Same fix approach as the width
+       breakpoint: shrink what's forcing more space than a short viewport
+       actually has. max-height rather than orientation:landscape, since
+       "not enough vertical space" is the real condition, not literally
+       being sideways. */
+    @media (max-height: 480px) {
+      .top-bar {
+        padding: 0.4rem 0.75rem;
+      }
+      .chart-area {
+        min-height: 120px;
+        max-height: 40vh;
+        padding: 0.5rem;
+      }
+      .monitor-list-area {
+        padding: 0.5rem 0.75rem;
+      }
+      .network-bar {
+        padding: 0.3rem 0.75rem;
+      }
+    }
+
     /* Autocomplete suggestions */
     datalist {
       background-color: var(--input-bg);
