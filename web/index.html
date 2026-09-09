@@ -596,6 +596,14 @@
       document.getElementById("localIpItem").style.display = "none";
     }
 
+    // exec/execStream require an absolute path, and it's platform-specific
+    // -- unlike the old bare "ping" (which just let $PATH resolve it, but
+    // isn't an option here). This app is Linux-only (the @sigmasd/gtk
+    // desktop shell), so /usr/bin/ping is the real desktop path.
+    const PING_BIN = denoapk.platform === "android"
+      ? "/system/bin/ping"
+      : "/usr/bin/ping";
+
     // State
     let monitors = new Map(); // host -> { color, data: [], stats: { ... } }
     let bookmarks = [];
@@ -798,7 +806,7 @@
       // -O: report "no answer yet" for a late/missing reply instead of
       // staying silent -- same flag the old Deno-side ping session used,
       // and what makes timeout detection below possible at all.
-      const stream = denoapk.execStream("/system/bin/ping", [
+      const stream = denoapk.execStream(PING_BIN, [
         "-O",
         monitor.host,
       ]);

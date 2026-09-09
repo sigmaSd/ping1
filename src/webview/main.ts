@@ -24,9 +24,15 @@ if (import.meta.main) {
     window.setTitle("Ping Monitor");
     window.setDefaultSize(1000, 600);
 
-    const webview = new Webview(false, undefined, window.ptr);
+    const webview = new Webview(true, undefined, window.ptr);
     webview.bind("show_app", () => {
       window.setVisible(true);
+      // @webview/webview's bind() needs a JSON-serializable return value --
+      // an implicit `undefined` return here produced "Failed to parse
+      // binding result as JSON" as an unhandled rejection on the page side
+      // (harmless since setVisible(true) already ran, but noisy). Verified
+      // by removing it and seeing the error disappear.
+      return true;
     });
     webview.title = "Ping Monitor";
     webview.size = { width: 1000, height: 600, hint: SizeHint.NONE };

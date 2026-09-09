@@ -19,7 +19,10 @@
   "desktop": {
     "app": {
       "name": "Ping Chart",
-      "identifier": "io.github.sigmasd.pingmonitor"
+      "identifier": "io.github.sigmasd.pingmonitor",
+      "icons": {
+        "linux": "./assets/icon.png"
+      }
     }
   }
 }
