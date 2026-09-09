@@ -292,9 +292,13 @@ function parseExecRequest(
   } catch (e) {
     return { error: "bad exec request: " + e };
   }
+  // A bare name (e.g. "ping") is resolved via $PATH by Deno.Command itself,
+  // same as an absolute path -- matches denoapk's Android side (verified to
+  // do the same $PATH resolution) and the original pre-port code, which
+  // already relied on this (new Deno.Command("ping", ...), no path at all).
   const cmd = typeof parsed.cmd === "string" ? parsed.cmd : null;
-  if (!cmd || !cmd.startsWith("/")) {
-    return { error: "cmd must be an absolute path" };
+  if (!cmd) {
+    return { error: "cmd must not be empty" };
   }
   const args = Array.isArray(parsed.args)
     ? parsed.args.filter((a): a is string => typeof a === "string")
