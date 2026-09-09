@@ -1,0 +1,81 @@
+name: Build & publish
+
+# Every push to master rebuilds the Linux desktop binary (deno compile) and
+# the Android APK (denoapk), and republishes them under a single rolling
+# "latest" GitHub Release. Not a versioned release process -- just "here's
+# what master currently builds", updated on every commit. Same pattern as
+# ~/dev/lab/cuse's own build.yml; see that repo for the multi-platform
+# desktop version of this (pingmonitor is Linux-only, since @sigmasd/gtk
+# is a GTK4 binding, so there's no cross-platform matrix here).
+#
+# This is separate from Flathub distribution (update-flatpak.ts, triggered
+# by hand) -- that's the stable release channel; this is "what's on master
+# right now", for anyone testing between Flathub releases.
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: denoland/setup-deno@v2
+      - run: deno task compile
+      # deno compile links no GTK/webview libraries at compile time --
+      # confirmed via ldd (only libc/libdl/libpthread etc show up) and
+      # strings (libgtk-4/libadwaita are dlopen'd at runtime, not linked),
+      # so no apt-get install step is needed just to produce the binary.
+      # Running it still needs GTK4 + libadwaita installed on the machine
+      # that runs it, same as any GTK4 desktop app.
+      - run: zip -q pingmonitor-linux-x64.zip pingChart
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pingmonitor-linux-x64
+          path: pingmonitor-linux-x64.zip
+          retention-days: 7
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: denoland/setup-deno@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      # --min-dep-age 0: JSR's default 24h-old-minimum policy is a
+      # supply-chain guard against installing someone else's just-published
+      # package; denoapk is ours, published by our own CI, so it doesn't
+      # apply to ourselves.
+      - run: deno run -A --min-dep-age 0 jsr:@sigmasd/denoapk build .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pingmonitor-android
+          path: dist/pingmonitor.apk
+          retention-days: 7
+
+  publish:
+    needs: [desktop, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest $(find artifacts -type f) \
+            --title "Latest build ($(git rev-parse --short HEAD))" \
+            --notes "Automatically built from the latest commit on master — not a stable release. For stable releases see Flathub." \
+            --prerelease
